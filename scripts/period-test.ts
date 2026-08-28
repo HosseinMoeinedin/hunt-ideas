@@ -60,6 +60,30 @@ async function main() {
     }
   }
 
+  // --- a 429 (rate limit) should NOT be retried — it wastes a request against the same limit ---
+  {
+    process.env.PRODUCT_HUNT_TOKEN = 'test-token';
+    let calls = 0;
+    const start = Date.now();
+    // @ts-expect-error overriding global fetch for this test
+    globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ errors: [{ message: 'rate limited' }] }), {
+        status: 429,
+        statusText: 'Too Many Requests',
+      });
+    };
+    try {
+      await fetchMonthProducts(0, new Date('2026-08-15T00:00:00.000Z'));
+      check('429 throws ProductHuntUpstreamError', false);
+    } catch (err) {
+      const elapsed = Date.now() - start;
+      check('429 throws ProductHuntUpstreamError', err instanceof ProductHuntUpstreamError);
+      check('429 makes exactly 1 request (no wasted retry)', calls === 1);
+      check('429 fails fast (did not wait out the retry delay)', elapsed < 250);
+    }
+  }
+
   let failed = 0;
   for (const [label, ok] of assertions) {
     console.log(`${ok ? 'PASS' : 'FAIL'} - ${label}`);

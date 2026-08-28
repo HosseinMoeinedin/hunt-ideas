@@ -23,6 +23,13 @@ const REDIRECT_CONCURRENCY = 4;
 const RETRY_DELAY_MS = 300;
 const GRAPHQL_TIMEOUT_MS = 8000;
 const REDIRECT_TIMEOUT_MS = 4000;
+// How long Next.js may serve a cached Product Hunt GraphQL response before
+// re-fetching. This is what actually protects the (fairly tight) Product
+// Hunt API rate limit — every page view would otherwise hit Product Hunt
+// directly, which is both slow and, under real traffic, gets rate-limited
+// fast. An hour matches the page's own revalidate window and is still far
+// more current than this monthly-archive use case needs.
+const GRAPHQL_CACHE_SECONDS = 3600;
 
 /** fetch() with a hard timeout so one slow/hanging request can't stall the whole serverless invocation. */
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -118,17 +125,28 @@ async function phRequest(variables: Record<string, unknown>): Promise<PostsPage>
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ query: POSTS_QUERY, variables }),
-        cache: 'no-store',
+        // Let Next.js cache this response for a while instead of hitting
+        // Product Hunt on every page view — see GRAPHQL_CACHE_SECONDS.
+        next: { revalidate: GRAPHQL_CACHE_SECONDS },
       },
       GRAPHQL_TIMEOUT_MS
     );
 
     if (!res.ok) {
       const bodyText = await res.text().catch(() => '<unreadable body>');
+      const rateLimitInfo = [
+        res.headers.get('x-rate-limit-remaining') && `remaining=${res.headers.get('x-rate-limit-remaining')}`,
+        res.headers.get('x-rate-limit-reset') && `reset=${res.headers.get('x-rate-limit-reset')}`,
+        res.headers.get('retry-after') && `retry-after=${res.headers.get('retry-after')}`,
+      ]
+        .filter(Boolean)
+        .join(' ');
       console.error(
-        `[producthunt] HTTP ${res.status} ${res.statusText} — body: ${bodyText.slice(0, 500)}`
+        `[producthunt] HTTP ${res.status} ${res.statusText}${rateLimitInfo ? ` (${rateLimitInfo})` : ''} — body: ${bodyText.slice(0, 500)}`
       );
-      throw new Error(`Product Hunt responded with HTTP ${res.status}`);
+      const err = new Error(`Product Hunt responded with HTTP ${res.status}`) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
     }
 
     const json = (await res.json()) as { data?: PostsPage; errors?: { message: string }[] };
@@ -148,7 +166,16 @@ async function phRequest(variables: Record<string, unknown>): Promise<PostsPage>
   try {
     return await attempt();
   } catch (firstErr) {
+    const status = (firstErr as Error & { status?: number })?.status;
     console.error(`[producthunt] first attempt failed: ${(firstErr as Error)?.message ?? firstErr}`);
+
+    // A 4xx (rate limit, bad auth, etc.) won't be fixed by retrying 300ms
+    // later — it just burns another request against the same limit. Only
+    // retry on transient failures (network errors, 5xx, timeouts).
+    if (status && status >= 400 && status < 500) {
+      throw new ProductHuntUpstreamError();
+    }
+
     await sleep(RETRY_DELAY_MS);
     try {
       return await attempt();
