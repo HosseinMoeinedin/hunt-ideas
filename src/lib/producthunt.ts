@@ -100,7 +100,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function phRequest(variables: Record<string, unknown>): Promise<PostsPage> {
-  const token = process.env.PRODUCT_HUNT_TOKEN;
+  // Trim defensively — a stray trailing newline/space from copy-pasting the
+  // token into a host's environment-variable UI is a common, hard-to-spot
+  // cause of "worked once, fails after" style bugs.
+  const token = process.env.PRODUCT_HUNT_TOKEN?.trim();
   if (!token) {
     throw new TokenMissingError();
   }
@@ -121,12 +124,17 @@ async function phRequest(variables: Record<string, unknown>): Promise<PostsPage>
     );
 
     if (!res.ok) {
+      const bodyText = await res.text().catch(() => '<unreadable body>');
+      console.error(
+        `[producthunt] HTTP ${res.status} ${res.statusText} — body: ${bodyText.slice(0, 500)}`
+      );
       throw new Error(`Product Hunt responded with HTTP ${res.status}`);
     }
 
     const json = (await res.json()) as { data?: PostsPage; errors?: { message: string }[] };
 
     if (json.errors && json.errors.length > 0) {
+      console.error(`[producthunt] GraphQL errors: ${JSON.stringify(json.errors).slice(0, 500)}`);
       throw new Error(json.errors[0]?.message ?? 'Product Hunt GraphQL error');
     }
 
@@ -139,11 +147,13 @@ async function phRequest(variables: Record<string, unknown>): Promise<PostsPage>
 
   try {
     return await attempt();
-  } catch {
+  } catch (firstErr) {
+    console.error(`[producthunt] first attempt failed: ${(firstErr as Error)?.message ?? firstErr}`);
     await sleep(RETRY_DELAY_MS);
     try {
       return await attempt();
-    } catch {
+    } catch (secondErr) {
+      console.error(`[producthunt] retry failed: ${(secondErr as Error)?.message ?? secondErr}`);
       throw new ProductHuntUpstreamError();
     }
   }
