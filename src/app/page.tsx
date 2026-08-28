@@ -3,9 +3,14 @@ import { fetchMonthProducts, getAllPeriods } from '@/lib/producthunt';
 import { toPeriodSummary } from '@/lib/period';
 import type { ProductsResponse } from '@/lib/types';
 
-// Revalidate periodically rather than on every single request — this is a
-// monthly archive, so an hourly refresh keeps it fast while staying current.
-export const revalidate = 3600;
+// Force this route to render per-request rather than being statically
+// generated. The Product Hunt fetch inside producthunt.ts is already cached
+// (next: { revalidate: 3600 }), so this doesn't reintroduce the "hits
+// Product Hunt on every view" problem — it just prevents a bad moment (an
+// upstream failure) from ever getting frozen into a static page and served
+// to everyone for the next hour regardless of whether Product Hunt has
+// since recovered.
+export const dynamic = 'force-dynamic';
 
 // Give the initial server render enough headroom for GraphQL pagination plus
 // concurrent website-redirect resolution (each inner fetch has its own
