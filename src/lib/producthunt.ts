@@ -21,6 +21,19 @@ const MAX_PAGES = 50;
 const MAX_PRODUCTS = 30;
 const REDIRECT_CONCURRENCY = 4;
 const RETRY_DELAY_MS = 300;
+const GRAPHQL_TIMEOUT_MS = 8000;
+const REDIRECT_TIMEOUT_MS = 4000;
+
+/** fetch() with a hard timeout so one slow/hanging request can't stall the whole serverless invocation. */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const POSTS_QUERY = `
   query MonthlyFeaturedPosts($postedAfter: DateTime!, $postedBefore: DateTime!, $after: String) {
@@ -93,15 +106,19 @@ async function phRequest(variables: Record<string, unknown>): Promise<PostsPage>
   }
 
   const attempt = async (): Promise<PostsPage> => {
-    const res = await fetch(PH_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
+    const res = await fetchWithTimeout(
+      PH_ENDPOINT,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ query: POSTS_QUERY, variables }),
+        cache: 'no-store',
       },
-      body: JSON.stringify({ query: POSTS_QUERY, variables }),
-      cache: 'no-store',
-    });
+      GRAPHQL_TIMEOUT_MS
+    );
 
     if (!res.ok) {
       throw new Error(`Product Hunt responded with HTTP ${res.status}`);
@@ -182,7 +199,7 @@ async function resolveWebsite(rawUrl: string): Promise<string | null> {
   }
 
   try {
-    const res = await fetch(rawUrl, { method: 'GET', redirect: 'manual' });
+    const res = await fetchWithTimeout(rawUrl, { method: 'GET', redirect: 'manual' }, REDIRECT_TIMEOUT_MS);
     const location = res.headers.get('location');
     if (!location) return null;
 

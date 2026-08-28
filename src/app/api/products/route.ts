@@ -13,6 +13,12 @@ import type { ProductsResponse } from '@/lib/types';
 // a monthly archive that only needs to be refreshed roughly once a month.
 const CACHE_CONTROL = 'public, max-age=86400, s-maxage=2592000, stale-while-revalidate=2592000';
 
+// Give the request enough headroom for GraphQL pagination plus concurrent
+// website-redirect resolution — each individual fetch inside has its own
+// timeout, but the platform's default function duration is too tight for the
+// combined worst case.
+export const maxDuration = 60;
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const offsetParam = searchParams.get('offset');

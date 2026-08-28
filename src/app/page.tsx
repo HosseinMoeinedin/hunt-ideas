@@ -7,6 +7,11 @@ import type { ProductsResponse } from '@/lib/types';
 // monthly archive, so an hourly refresh keeps it fast while staying current.
 export const revalidate = 3600;
 
+// Give the initial server render enough headroom for GraphQL pagination plus
+// concurrent website-redirect resolution (each inner fetch has its own
+// timeout; this raises the platform's overall function duration ceiling).
+export const maxDuration = 60;
+
 const GENERIC_ERROR = 'Product Hunt could not be reached. Try again in a moment.';
 
 export default async function Home() {
