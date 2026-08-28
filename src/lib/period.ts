@@ -20,6 +20,19 @@ function monthName(date: Date): string {
   return date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
 }
 
+/**
+ * Rounds a timestamp down to the start of its UTC hour. Used as the "now"
+ * boundary for the current month's query: an unrounded, millisecond-precise
+ * "now" would be different on every single request, so it could never be
+ * served from Next's fetch cache — every page view would hit Product Hunt
+ * directly. Rounding to the hour means every request within the same clock
+ * hour shares an identical query (and therefore an identical cache entry),
+ * which is also exactly the cache window the app already uses elsewhere.
+ */
+function roundDownToHour(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours(), 0, 0, 0));
+}
+
 /** The most negative offset allowed: January of the current year. */
 export function getMinOffset(now: Date = new Date()): number {
   return -now.getUTCMonth();
@@ -39,7 +52,7 @@ export function getPeriod(offsetRaw: number, now: Date = new Date()): Period {
   const monthIndex = now.getUTCMonth() + offset; // 0-based, always within [0, currentMonthIndex]
 
   const start = new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
-  const end = offset === 0 ? now : new Date(Date.UTC(year, monthIndex + 1, 1, 0, 0, 0, 0));
+  const end = offset === 0 ? roundDownToHour(now) : new Date(Date.UTC(year, monthIndex + 1, 1, 0, 0, 0, 0));
 
   return {
     key: `monthly:${offset}`,

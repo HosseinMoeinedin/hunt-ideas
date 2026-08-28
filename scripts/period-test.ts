@@ -1,4 +1,4 @@
-import { getAllPeriods, clampOffset, getMinOffset } from '../src/lib/period';
+import { getAllPeriods, clampOffset, getMinOffset, getPeriod } from '../src/lib/period';
 import { fetchMonthProducts, TokenMissingError, ProductHuntUpstreamError } from '../src/lib/producthunt';
 
 async function main() {
@@ -17,6 +17,18 @@ async function main() {
     check('August: offset clamps past (-99) up to -7', clampOffset(-99, now) === -7);
     check('August: key format is "monthly:-3"', periods[3].key === 'monthly:-3');
     check('August: full label "August 2026"', periods[0].label === 'August 2026');
+  }
+
+  // --- current-month "end" must be stable within an hour (cache-key stability) ---
+  // Two requests seconds apart must produce the identical postedBefore value, or
+  // the current month's Product Hunt query can never be served from cache.
+  {
+    const a = getPeriod(0, new Date('2026-08-15T12:00:00.001Z'));
+    const b = getPeriod(0, new Date('2026-08-15T12:59:59.999Z'));
+    const c = getPeriod(0, new Date('2026-08-15T13:00:00.001Z'));
+    check('current-month end is identical for two requests in the same hour', a.end.getTime() === b.end.getTime());
+    check('current-month end changes once the clock hour rolls over', a.end.getTime() !== c.end.getTime());
+    check('current-month end is rounded down to the top of the hour', a.end.toISOString() === '2026-08-15T12:00:00.000Z');
   }
 
   // --- January (month index 0): only 1 period, no negative offsets possible ---
