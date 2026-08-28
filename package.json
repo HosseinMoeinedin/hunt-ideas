@@ -6,9 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "tsx scripts/mock-test.ts && tsx scripts/period-test.ts"
   },
   "dependencies": {
+    "lucide-react": "^1.35.0",
     "next": "16.3.3",
     "react": "19.2.8",
     "react-dom": "19.2.8"
@@ -21,6 +23,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.3",
     "tailwindcss": "^4",
+    "tsx": "^4.23.12",
     "typescript": "^5"
   }
 }
