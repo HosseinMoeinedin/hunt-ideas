@@ -1,5 +1,5 @@
 import { getAllPeriods, clampOffset, getMinOffset, getPeriod } from '../src/lib/period';
-import { fetchMonthProducts, TokenMissingError, ProductHuntUpstreamError } from '../src/lib/producthunt';
+import { fetchMonthProductsForTesting, TokenMissingError, ProductHuntUpstreamError } from '../src/lib/producthunt';
 
 async function main() {
   const assertions: [string, boolean][] = [];
@@ -44,7 +44,7 @@ async function main() {
   {
     delete process.env.PRODUCT_HUNT_TOKEN;
     try {
-      await fetchMonthProducts(0, new Date('2026-08-15T00:00:00.000Z'));
+      await fetchMonthProductsForTesting(0, new Date('2026-08-15T00:00:00.000Z'));
       check('missing token throws TokenMissingError', false);
     } catch (err) {
       check('missing token throws TokenMissingError', err instanceof TokenMissingError);
@@ -62,7 +62,7 @@ async function main() {
       throw new Error('network down');
     };
     try {
-      await fetchMonthProducts(0, new Date('2026-08-15T00:00:00.000Z'));
+      await fetchMonthProductsForTesting(0, new Date('2026-08-15T00:00:00.000Z'));
       check('upstream failure throws ProductHuntUpstreamError', false);
     } catch (err) {
       const elapsed = Date.now() - start;
@@ -86,7 +86,7 @@ async function main() {
       });
     };
     try {
-      await fetchMonthProducts(0, new Date('2026-08-15T00:00:00.000Z'));
+      await fetchMonthProductsForTesting(0, new Date('2026-08-15T00:00:00.000Z'));
       check('429 throws ProductHuntUpstreamError', false);
     } catch (err) {
       const elapsed = Date.now() - start;

@@ -103,10 +103,10 @@ async function mockFetch(input: string | URL | Request, init?: RequestInit): Pro
 globalThis.fetch = mockFetch;
 
 async function main() {
-  const { fetchMonthProducts } = await import('../src/lib/producthunt.ts');
+  const { fetchMonthProductsForTesting } = await import('../src/lib/producthunt.ts');
   const now = new Date('2026-08-15T12:00:00.000Z');
 
-  const result = await fetchMonthProducts(0, now);
+  const result = await fetchMonthProductsForTesting(0, now);
 
   const assertions: [string, boolean][] = [
     ['made exactly 2 paginated requests', requestCount === 2],

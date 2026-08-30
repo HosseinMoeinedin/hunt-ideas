@@ -1,3 +1,4 @@
+import { unstable_cache } from 'next/cache';
 import { getPeriod, getAllPeriods, type Period } from './period';
 import type { Product } from './types';
 
@@ -23,13 +24,25 @@ const REDIRECT_CONCURRENCY = 4;
 const RETRY_DELAY_MS = 300;
 const GRAPHQL_TIMEOUT_MS = 8000;
 const REDIRECT_TIMEOUT_MS = 4000;
-// How long Next.js may serve a cached Product Hunt GraphQL response before
-// re-fetching. This is what actually protects the (fairly tight) Product
-// Hunt API rate limit — every page view would otherwise hit Product Hunt
-// directly, which is both slow and, under real traffic, gets rate-limited
-// fast. An hour matches the page's own revalidate window and is still far
-// more current than this monthly-archive use case needs.
+// How long Next.js may serve a cached raw Product Hunt GraphQL response
+// before re-fetching, as a defensive backstop. The real protection for the
+// rate limit is the application-level cache below (unstable_cache), which
+// caches the ENTIRE result — GraphQL data plus resolved websites — as one
+// unit, so a cache hit makes zero outbound requests at all, not just zero
+// GraphQL requests.
 const GRAPHQL_CACHE_SECONDS = 3600;
+
+// Current month: its cache key changes every UTC hour (period.ts rounds the
+// "end" boundary down to the hour), so this just has to be long enough to
+// span at least one hour without expiring mid-hour and forcing an extra
+// refetch of an identical query.
+const CURRENT_MONTH_CACHE_SECONDS = 3600;
+// Past months: the query window (postedAfter/postedBefore) is fixed and
+// never changes once the month is over, so there is nothing to "get fresh"
+// by refetching — the same 30ish products with (very occasionally) a vote
+// count that ticked up. Cache these for a month; a fresh deploy also gets a
+// fresh cache, so this is not a permanent freeze.
+const PAST_MONTH_CACHE_SECONDS = 60 * 60 * 24 * 30;
 
 /** fetch() with a hard timeout so one slow/hanging request can't stall the whole serverless invocation. */
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -280,8 +293,52 @@ export type MonthlyProducts = {
   sourceUrl: string;
 };
 
-export async function fetchMonthProducts(offsetRaw: number, now: Date = new Date()): Promise<MonthlyProducts> {
-  const period = getPeriod(offsetRaw, now);
+/**
+ * The cache-friendly return shape: `period.start`/`period.end` are Dates,
+ * which do not round-trip through the cache's JSON serialization as Dates —
+ * they'd come back as plain strings on a cache hit, silently breaking
+ * anything that called `.toISOString()` on them. Nothing downstream needs
+ * those two fields (only `toPeriodSummary`'s key/offset/label/shortLabel
+ * are used outside this module), so the cached shape just omits them and
+ * `fetchMonthProducts` reattaches the real Date objects the caller passed
+ * in before returning.
+ */
+type CachedMonthlyProducts = {
+  products: Product[];
+  period: Omit<Period, 'start' | 'end'>;
+  scannedCount: number;
+  sourceUrl: string;
+};
+
+/**
+ * Does the actual work: paginate Product Hunt, filter/sort/cap, resolve
+ * every product's real website (the ~20-30 extra HTTP round-trips that were
+ * previously NOT cached at all and re-run on every single page view). Takes
+ * only plain serializable arguments — not a `Period` with `Date` fields —
+ * because these arguments are exactly what `unstable_cache` hashes into the
+ * cache key, and they need to be deterministic and cache-friendly.
+ */
+async function fetchMonthProductsUncached(
+  periodKey: string,
+  startISO: string,
+  endISO: string,
+  year: number,
+  month: number,
+  label: string,
+  shortLabel: string,
+  offset: number
+): Promise<CachedMonthlyProducts> {
+  const period: Period = {
+    key: periodKey,
+    offset,
+    label,
+    shortLabel,
+    year,
+    month,
+    start: new Date(startISO),
+    end: new Date(endISO),
+  };
+
   const { posts, scannedCount } = await fetchRawPosts(period);
 
   const withUrls = posts.filter((post): post is RawPost & { url: string; website: string } =>
@@ -323,7 +380,63 @@ export async function fetchMonthProducts(offsetRaw: number, now: Date = new Date
 
   const sourceUrl = `https://www.producthunt.com/leaderboard/monthly/${period.year}/${period.month}`;
 
-  return { products, period, scannedCount, sourceUrl };
+  return { products, period: { key: periodKey, offset, label, shortLabel, year, month }, scannedCount, sourceUrl };
+}
+
+// Two separate `unstable_cache` instances (rather than one shared instance
+// with a variable `revalidate`) so the current month and past months can
+// have different cache lifetimes — see CURRENT_MONTH_CACHE_SECONDS /
+// PAST_MONTH_CACHE_SECONDS above. Each one is Next's explicit,
+// application-level cache: a cache hit runs none of this module's code at
+// all (no GraphQL request, no website-redirect resolution), which is what
+// actually delivers "fetch once, then serve everyone from cache."
+const getCachedCurrentMonth = unstable_cache(fetchMonthProductsUncached, ['hunt-ideas-month-products', 'current'], {
+  revalidate: CURRENT_MONTH_CACHE_SECONDS,
+});
+const getCachedPastMonth = unstable_cache(fetchMonthProductsUncached, ['hunt-ideas-month-products', 'past'], {
+  revalidate: PAST_MONTH_CACHE_SECONDS,
+});
+
+export async function fetchMonthProducts(offsetRaw: number, now: Date = new Date()): Promise<MonthlyProducts> {
+  const period = getPeriod(offsetRaw, now);
+  const getCached = period.offset === 0 ? getCachedCurrentMonth : getCachedPastMonth;
+
+  const cached = await getCached(
+    period.key,
+    period.start.toISOString(),
+    period.end.toISOString(),
+    period.year,
+    period.month,
+    period.label,
+    period.shortLabel,
+    period.offset
+  );
+
+  // Reattach the real Date objects (see CachedMonthlyProducts) rather than
+  // relying on whatever the cache handed back for them.
+  return { ...cached, period: { ...cached.period, start: period.start, end: period.end } };
+}
+
+/**
+ * Bypasses the `unstable_cache` wrapper and runs the pipeline directly.
+ * `unstable_cache` requires a live Next.js request context (it throws
+ * "incrementalCache missing" outside one), which standalone test scripts
+ * don't have — so tests exercise this instead of `fetchMonthProducts`. It
+ * runs the exact same pipeline; the only thing it skips is the caching.
+ */
+export async function fetchMonthProductsForTesting(offsetRaw: number, now: Date = new Date()): Promise<MonthlyProducts> {
+  const period = getPeriod(offsetRaw, now);
+  const result = await fetchMonthProductsUncached(
+    period.key,
+    period.start.toISOString(),
+    period.end.toISOString(),
+    period.year,
+    period.month,
+    period.label,
+    period.shortLabel,
+    period.offset
+  );
+  return { ...result, period: { ...result.period, start: period.start, end: period.end } };
 }
 
 export { getAllPeriods };
