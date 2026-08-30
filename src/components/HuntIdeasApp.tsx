@@ -26,7 +26,12 @@ export default function HuntIdeasApp({ initialData, initialError, initialOffset 
   const [offset, setOffset] = useState(initialOffset);
   const [data, setData] = useState<ProductsResponse>(initialData);
   const [error, setError] = useState<string | null>(initialError);
-  const [loading, setLoading] = useState(false);
+  // Starts true: the page no longer server-renders the first month's data
+  // (see the comment in page.tsx) — this effect fetches it on mount, the
+  // same way it fetches every subsequent month change, so the very first
+  // load needs to start in the loading state rather than a false "empty"
+  // one.
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
 
@@ -35,17 +40,20 @@ export default function HuntIdeasApp({ initialData, initialError, initialOffset 
   const controlsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (isFirstRun.current) {
-      isFirstRun.current = false;
-      return;
-    }
-
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setLoading(true);
-    setError(null);
+    // On mount, `loading`/`error` already start at the right values (true /
+    // null) via useState's initializer above, so setting them again here
+    // would just be a redundant synchronous setState in an effect. Only the
+    // later runs — an actual month change — need to reset them.
+    if (isFirstRun.current) {
+      isFirstRun.current = false;
+    } else {
+      setLoading(true);
+      setError(null);
+    }
 
     fetch(`/api/products?offset=${offset}`, { signal: controller.signal })
       .then(async (res) => {

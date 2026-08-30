@@ -328,6 +328,12 @@ async function fetchMonthProductsUncached(
   shortLabel: string,
   offset: number
 ): Promise<CachedMonthlyProducts> {
+  // Only runs on a genuine cache MISS (unstable_cache short-circuits this
+  // entirely on a hit) — logging it lets a cache-hit vs. cache-miss
+  // discrepancy between routes (e.g. "/" failing while "/api/products"
+  // succeeds for the identical period) actually be seen in the logs instead
+  // of guessed at.
+  console.log(`[producthunt] cache MISS — running full pipeline for ${periodKey} (${startISO} to ${endISO})`);
   const period: Period = {
     key: periodKey,
     offset,
