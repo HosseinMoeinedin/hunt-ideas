@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { ArrowUpRight } from 'lucide-react';
 import type { Product } from '@/lib/types';
 
@@ -11,6 +12,14 @@ type Props = {
 export default function ProductCard({ product, priority }: Props) {
   const alt = `${product.name} landing page hero`;
   const formattedVotes = product.votes.toLocaleString('en-US');
+
+  // `product.preview` asks thum.io to screenshot wherever Product Hunt's
+  // redirect link actually leads — thum.io's own capture infrastructure
+  // follows that redirect, not this app. If thum.io can't get through for
+  // this particular link, fall back once to Product Hunt's own
+  // launch-gallery image rather than showing a broken image.
+  const [imgSrc, setImgSrc] = useState(product.preview);
+  const triedFallback = imgSrc !== product.preview;
 
   return (
     <article className="group">
@@ -24,10 +33,15 @@ export default function ProductCard({ product, priority }: Props) {
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={product.preview}
+            src={imgSrc}
             alt={alt}
             loading={priority ? 'eager' : 'lazy'}
             referrerPolicy="no-referrer"
+            onError={() => {
+              if (!triedFallback && product.previewFallback) {
+                setImgSrc(product.previewFallback);
+              }
+            }}
             className="h-full w-full object-cover object-top transition-[transform,filter] duration-300 ease-out group-hover:scale-[1.018] group-hover:brightness-[0.7]"
           />
         </a>

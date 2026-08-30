@@ -20,23 +20,13 @@ const PH_ENDPOINT = 'https://api.producthunt.com/v2/api/graphql';
 const PAGE_SIZE = 20;
 const MAX_PAGES = 50;
 const MAX_PRODUCTS = 30;
-const REDIRECT_CONCURRENCY = 4;
 const RETRY_DELAY_MS = 300;
 const GRAPHQL_TIMEOUT_MS = 8000;
-const REDIRECT_TIMEOUT_MS = 4000;
-// Sent on the website-redirect-resolution request. Without a browser-like
-// User-Agent, Product Hunt's /r/ redirect links were returning a response
-// with no way to tell where they actually go — every single resolution was
-// silently failing and falling back to Product Hunt's own thumbnail. A
-// normal browser UA is the fix.
-const REDIRECT_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 // How long Next.js may serve a cached raw Product Hunt GraphQL response
 // before re-fetching, as a defensive backstop. The real protection for the
 // rate limit is the application-level cache below (unstable_cache), which
-// caches the ENTIRE result — GraphQL data plus resolved websites — as one
-// unit, so a cache hit makes zero outbound requests at all, not just zero
-// GraphQL requests.
+// caches the ENTIRE result as one unit, so a cache hit makes zero outbound
+// requests at all, not just zero GraphQL requests.
 const GRAPHQL_CACHE_SECONDS = 3600;
 
 // Current month: its cache key changes every UTC hour (period.ts rounds the
@@ -50,13 +40,13 @@ const CURRENT_MONTH_CACHE_SECONDS = 3600;
 // count that ticked up. Cache these for a month.
 const PAST_MONTH_CACHE_SECONDS = 60 * 60 * 24 * 30;
 
-// Bump this when a code change alters what a cache HIT would have returned
-// (e.g. fixing resolveWebsite). Vercel's Data Cache (what unstable_cache
-// uses) persists across deployments — a new deploy does NOT itself
-// invalidate the old cached output — so without this, a fix like that would
-// silently sit unused behind the old cached result for up to
-// PAST_MONTH_CACHE_SECONDS (30 days) before anyone actually saw it.
-const CACHE_VERSION = 'v2';
+// Bump this when a code change alters what a cache HIT would have returned.
+// Vercel's Data Cache (what unstable_cache uses) persists across
+// deployments — a new deploy does NOT itself invalidate the old cached
+// output — so without this, a fix like that would silently sit unused
+// behind the old cached result for up to PAST_MONTH_CACHE_SECONDS (30 days)
+// before anyone actually saw it.
+const CACHE_VERSION = 'v3';
 
 /** fetch() with a hard timeout so one slow/hanging request can't stall the whole serverless invocation. */
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -245,82 +235,27 @@ async function fetchRawPosts(period: Period): Promise<{ posts: RawPost[]; scanne
   return { posts: Array.from(byId.values()), scannedCount };
 }
 
-/**
- * Resolves a single website URL. Non-Product-Hunt URLs are returned unchanged.
- * Product Hunt redirect URLs are resolved by reading the `Location` header
- * off a single manual (not followed) request to Product Hunt's own /r/
- * link — never the destination site — so this only ever waits on Product
- * Hunt's own server, not on however fast or slow ~30 different real
- * third-party websites happen to be. Returns null when a direct destination
- * can't be determined.
- *
- * Two earlier versions of this tried to reach the ACTUAL destination site
- * (GET then HEAD with `redirect: 'follow'`) to be tolerant of multi-hop
- * redirect chains. Both were caught live turning offset=0 into consistent
- * 502s on a cold cache: waiting on ~30 real websites' response times,
- * even batched, was too slow for the function's time budget. This
- * single-hop version is a smaller fix than that — it won't follow a
- * SECOND redirect hop if Product Hunt's own link chains through one — but
- * it's the version that was actually reliable in production; the User-Agent
- * header below is the real fix for why resolution was failing at all.
- */
-async function resolveWebsite(rawUrl: string): Promise<string | null> {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return null;
-  }
-
-  if (!parsed.hostname.endsWith('producthunt.com')) {
-    return rawUrl;
-  }
-
-  try {
-    const res = await fetchWithTimeout(
-      rawUrl,
-      {
-        method: 'GET',
-        redirect: 'manual',
-        headers: {
-          'User-Agent': REDIRECT_USER_AGENT,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-      },
-      REDIRECT_TIMEOUT_MS
-    );
-    const location = res.headers.get('location');
-    if (!location) return null;
-
-    const resolved = new URL(location, rawUrl);
-    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') {
-      return null;
-    }
-    return resolved.toString();
-  } catch {
-    return null;
-  }
-}
-
-/** Resolves a list of website URLs with at most `REDIRECT_CONCURRENCY` requests in flight at once. */
-async function resolveWebsitesConcurrently(urls: (string | null)[]): Promise<(string | null)[]> {
-  const results = new Array<string | null>(urls.length).fill(null);
-  let cursor = 0;
-
-  async function worker() {
-    while (cursor < urls.length) {
-      const index = cursor;
-      cursor += 1;
-      const url = urls[index];
-      results[index] = url ? await resolveWebsite(url) : null;
-    }
-  }
-
-  const workerCount = Math.min(REDIRECT_CONCURRENCY, urls.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
-}
-
+// This module used to try resolving each product's Product Hunt redirect
+// link (post.website, e.g. producthunt.com/r/XYZ) to its real destination
+// itself, server-side, before building a thum.io screenshot URL from that
+// resolved address. Direct testing (a temporary diagnostic route hit
+// against a live redirect link) showed why every attempt at that — with or
+// without a browser User-Agent, reading the Location header manually or
+// letting fetch follow it — came back empty: Product Hunt serves these
+// links from behind Cloudflare, which returned a flat 403 Forbidden to
+// every variant tried. That's Cloudflare's bot protection working exactly
+// as intended against a datacenter server making the request; no amount of
+// header tuning fixes it, and a real visitor's own browser sails through
+// the same link with no issue.
+//
+// So this app no longer tries. `post.website` (the Product Hunt redirect
+// link) is used as-is for the "visit site" link — it works fine for a real
+// click — and is handed directly to thum.io to screenshot. thum.io's own
+// capture infrastructure follows that redirect itself, from its own
+// servers, as part of rendering the page; if it can get further than a bare
+// server-side fetch could, the screenshot is the real site. If it can't,
+// ProductCard falls back to Product Hunt's own launch-gallery image
+// client-side (see Product.previewFallback) rather than a broken image.
 function buildScreenshotUrl(websiteUrl: string): string {
   return `https://image.thum.io/get/width/1200/crop/720/noanimate/${websiteUrl}`;
 }
@@ -350,10 +285,9 @@ type CachedMonthlyProducts = {
 };
 
 /**
- * Does the actual work: paginate Product Hunt, filter/sort/cap, resolve
- * every product's real website (the ~20-30 extra HTTP round-trips that were
- * previously NOT cached at all and re-run on every single page view). Takes
- * only plain serializable arguments — not a `Period` with `Date` fields —
+ * Does the actual work: paginate Product Hunt, then filter/sort/cap to the
+ * top products for the month. Takes only plain serializable arguments — not
+ * a `Period` with `Date` fields —
  * because these arguments are exactly what `unstable_cache` hashes into the
  * cache key, and they need to be deterministic and cache-friendly.
  */
@@ -393,17 +327,8 @@ async function fetchMonthProductsUncached(
   withUrls.sort((a, b) => (b.votesCount ?? 0) - (a.votesCount ?? 0));
   const top = withUrls.slice(0, MAX_PRODUCTS);
 
-  const resolvedWebsites = await resolveWebsitesConcurrently(top.map((post) => post.website));
-
   const products: Product[] = top.map((post, index) => {
-    const officialWebsite = resolvedWebsites[index];
-    const finalWebsite = officialWebsite ?? post.website;
     const fallbackMedia = post.media?.[0]?.url ?? null;
-
-    const preview = officialWebsite
-      ? buildScreenshotUrl(officialWebsite)
-      : fallbackMedia ?? buildScreenshotUrl(finalWebsite);
-
     const topicEdges = post.topics?.edges ?? [];
     const category = topicEdges[0]?.node?.name || 'Other';
 
@@ -417,9 +342,10 @@ async function fetchMonthProductsUncached(
       rank: index + 1,
       launchRank: post.dailyRank ?? null,
       votes: post.votesCount ?? 0,
-      website: finalWebsite,
+      website: post.website,
       productHunt: post.url,
-      preview,
+      preview: buildScreenshotUrl(post.website),
+      previewFallback: fallbackMedia,
     };
   });
 
@@ -433,8 +359,8 @@ async function fetchMonthProductsUncached(
 // have different cache lifetimes — see CURRENT_MONTH_CACHE_SECONDS /
 // PAST_MONTH_CACHE_SECONDS above. Each one is Next's explicit,
 // application-level cache: a cache hit runs none of this module's code at
-// all (no GraphQL request, no website-redirect resolution), which is what
-// actually delivers "fetch once, then serve everyone from cache."
+// all (no GraphQL request), which is what actually delivers "fetch once,
+// then serve everyone from cache."
 const getCachedCurrentMonth = unstable_cache(
   fetchMonthProductsUncached,
   ['hunt-ideas-month-products', 'current', CACHE_VERSION],

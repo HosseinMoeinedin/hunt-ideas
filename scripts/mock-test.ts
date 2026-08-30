@@ -1,10 +1,15 @@
 /**
  * Standalone integration test that exercises fetchMonthProducts() against a
  * mocked fetch implementation, since this sandbox's network egress does not
- * allow reaching api.producthunt.com or image.thum.io directly. This proves
- * out pagination, dedup, filtering, sorting, redirect resolution, fallback
- * media, and screenshot-URL construction before deploying to a host with
- * normal internet access.
+ * allow reaching api.producthunt.com directly. This proves out pagination,
+ * dedup, filtering, sorting, and screenshot/fallback-URL construction before
+ * deploying to a host with normal internet access.
+ *
+ * This app no longer tries to resolve Product Hunt's redirect links to a
+ * real destination server-side (Product Hunt's Cloudflare protection
+ * blocks that outright — see the comment above buildScreenshotUrl in
+ * lib/producthunt.ts) — so there's no redirect-following fetch left to
+ * mock; `website` is used exactly as Product Hunt's API returns it.
  */
 process.env.PRODUCT_HUNT_TOKEN = 'test-token';
 
@@ -40,12 +45,9 @@ const page1Nodes: FakeNode[] = Array.from({ length: 20 }, (_, i) => {
     return makeNode({ id, votesCount: 100 - i, website: null });
   }
   if (id === 'p1') {
-    // Redirect-style PH URL that needs server-side resolution.
+    // Product Hunt redirect-style URL — kept as-is now, handed straight to
+    // thum.io rather than resolved server-side first.
     return makeNode({ id, votesCount: 100 - i, website: 'https://redirect.producthunt.com/r/p1' });
-  }
-  if (id === 'p2') {
-    // Redirect URL that fails to resolve -> should fall back to PH media.
-    return makeNode({ id, votesCount: 100 - i, website: 'https://redirect.producthunt.com/r/p2-broken' });
   }
   return makeNode({ id, votesCount: 100 - i });
 });
@@ -87,15 +89,6 @@ async function mockFetch(input: string | URL | Request, init?: RequestInit): Pro
     );
   }
 
-  if (url === 'https://redirect.producthunt.com/r/p1') {
-    return new Response(null, { status: 302, headers: { Location: 'https://real-site-p1.example.com/landing' } });
-  }
-
-  if (url === 'https://redirect.producthunt.com/r/p2-broken') {
-    // No Location header -> resolution should fail and fall back to PH media.
-    return new Response(null, { status: 302 });
-  }
-
   throw new Error(`Unexpected fetch to ${url}`);
 }
 
@@ -126,15 +119,17 @@ async function main() {
       result.products.find((p) => p.id === 'p3')?.votes === 98,
     ],
     [
-      'p1 resolved redirect website and built a thum.io preview from it',
-      result.products.find((p) => p.id === 'p1')?.website === 'https://real-site-p1.example.com/landing' &&
-        result.products.find((p) => p.id === 'p1')?.preview ===
-          'https://image.thum.io/get/width/1200/crop/720/noanimate/https://real-site-p1.example.com/landing',
+      'p1 (a Product Hunt redirect link) is kept as-is, not resolved server-side',
+      result.products.find((p) => p.id === 'p1')?.website === 'https://redirect.producthunt.com/r/p1',
     ],
     [
-      'p2 failed redirect resolution, kept original PH url, fell back to PH media preview',
-      result.products.find((p) => p.id === 'p2')?.website === 'https://redirect.producthunt.com/r/p2-broken' &&
-        result.products.find((p) => p.id === 'p2')?.preview === 'https://ph-media.example.com/p2.png',
+      'p1 preview is a thum.io screenshot URL built directly from that redirect link',
+      result.products.find((p) => p.id === 'p1')?.preview ===
+        'https://image.thum.io/get/width/1200/crop/720/noanimate/https://redirect.producthunt.com/r/p1',
+    ],
+    [
+      "p1's previewFallback carries Product Hunt's own launch image, for ProductCard to fall back to client-side",
+      result.products.find((p) => p.id === 'p1')?.previewFallback === 'https://ph-media.example.com/p1.png',
     ],
     [
       'a normal direct-website product builds a thum.io preview from its own website',
