@@ -247,8 +247,8 @@ async function fetchRawPosts(period: Period): Promise<{ posts: RawPost[]; scanne
 
 /**
  * Resolves a single website URL. Non-Product-Hunt URLs are returned unchanged.
- * Product Hunt redirect URLs are resolved with a manual-redirect GET request;
- * returns null when a direct destination cannot be determined.
+ * Product Hunt redirect URLs are resolved with a HEAD request that follows
+ * redirects; returns null when a direct destination cannot be determined.
  */
 async function resolveWebsite(rawUrl: string): Promise<string | null> {
   let parsed: URL;
@@ -264,13 +264,21 @@ async function resolveWebsite(rawUrl: string): Promise<string | null> {
 
   try {
     // `redirect: 'follow'` (the default) rather than reading the Location
-    // header off a single manual hop: it's tolerant of Product Hunt
-    // sending the visitor through more than one redirect, and `res.url`
-    // reliably reflects wherever that chain actually ended up.
+    // header off a single manual hop: it's tolerant of Product Hunt sending
+    // the visitor through more than one redirect, and `res.url` reliably
+    // reflects wherever that chain actually ended up.
+    //
+    // `method: 'HEAD'`, not GET: a first version of this used GET, which
+    // meant actually downloading the real destination website's page for
+    // all ~30 products on every cache-miss — on a cold cache this was slow
+    // enough (real third-party sites, not Product Hunt's own fast servers)
+    // to blow the function's time budget and turn into 502s. HEAD follows
+    // the exact same redirect chain and still gives us the final `res.url`,
+    // without waiting on a body most sites don't even need to send.
     const res = await fetchWithTimeout(
       rawUrl,
       {
-        method: 'GET',
+        method: 'HEAD',
         redirect: 'follow',
         headers: {
           'User-Agent': REDIRECT_USER_AGENT,
