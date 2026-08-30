@@ -88,12 +88,23 @@ async function mockFetch(input: string | URL | Request, init?: RequestInit): Pro
   }
 
   if (url === 'https://redirect.producthunt.com/r/p1') {
-    return new Response(null, { status: 302, headers: { Location: 'https://real-site-p1.example.com/landing' } });
+    // Simulates what a real `redirect: 'follow'` fetch sees after the
+    // browser/undici transparently follows the 302: a response whose `.url`
+    // is the final destination, not the original request URL. `Response`
+    // doesn't expose a way to set `.url` via its constructor, so it's
+    // shadowed here the same way a real fetch implementation sets it.
+    const res = new Response(null, { status: 200 });
+    Object.defineProperty(res, 'url', { value: 'https://real-site-p1.example.com/landing' });
+    return res;
   }
 
   if (url === 'https://redirect.producthunt.com/r/p2-broken') {
-    // No Location header -> resolution should fail and fall back to PH media.
-    return new Response(null, { status: 302 });
+    // No Location header on the real 302 this simulates -> fetch can't
+    // follow it, so `.url` stays the original Product Hunt URL -> resolution
+    // should fail and fall back to PH media.
+    const res = new Response(null, { status: 302 });
+    Object.defineProperty(res, 'url', { value: url });
+    return res;
   }
 
   throw new Error(`Unexpected fetch to ${url}`);

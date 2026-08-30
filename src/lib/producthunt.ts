@@ -24,6 +24,13 @@ const REDIRECT_CONCURRENCY = 4;
 const RETRY_DELAY_MS = 300;
 const GRAPHQL_TIMEOUT_MS = 8000;
 const REDIRECT_TIMEOUT_MS = 4000;
+// Sent on the website-redirect-resolution request. Without a browser-like
+// User-Agent, Product Hunt's /r/ redirect links were returning a response
+// with no way to tell where they actually go — every single resolution was
+// silently failing and falling back to Product Hunt's own thumbnail. A
+// normal browser UA is the fix.
+const REDIRECT_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 // How long Next.js may serve a cached raw Product Hunt GraphQL response
 // before re-fetching, as a defensive backstop. The real protection for the
 // rate limit is the application-level cache below (unstable_cache), which
@@ -40,9 +47,16 @@ const CURRENT_MONTH_CACHE_SECONDS = 3600;
 // Past months: the query window (postedAfter/postedBefore) is fixed and
 // never changes once the month is over, so there is nothing to "get fresh"
 // by refetching — the same 30ish products with (very occasionally) a vote
-// count that ticked up. Cache these for a month; a fresh deploy also gets a
-// fresh cache, so this is not a permanent freeze.
+// count that ticked up. Cache these for a month.
 const PAST_MONTH_CACHE_SECONDS = 60 * 60 * 24 * 30;
+
+// Bump this when a code change alters what a cache HIT would have returned
+// (e.g. fixing resolveWebsite). Vercel's Data Cache (what unstable_cache
+// uses) persists across deployments — a new deploy does NOT itself
+// invalidate the old cached output — so without this, a fix like that would
+// silently sit unused behind the old cached result for up to
+// PAST_MONTH_CACHE_SECONDS (30 days) before anyone actually saw it.
+const CACHE_VERSION = 'v2';
 
 /** fetch() with a hard timeout so one slow/hanging request can't stall the whole serverless invocation. */
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -249,15 +263,32 @@ async function resolveWebsite(rawUrl: string): Promise<string | null> {
   }
 
   try {
-    const res = await fetchWithTimeout(rawUrl, { method: 'GET', redirect: 'manual' }, REDIRECT_TIMEOUT_MS);
-    const location = res.headers.get('location');
-    if (!location) return null;
+    // `redirect: 'follow'` (the default) rather than reading the Location
+    // header off a single manual hop: it's tolerant of Product Hunt
+    // sending the visitor through more than one redirect, and `res.url`
+    // reliably reflects wherever that chain actually ended up.
+    const res = await fetchWithTimeout(
+      rawUrl,
+      {
+        method: 'GET',
+        redirect: 'follow',
+        headers: {
+          'User-Agent': REDIRECT_USER_AGENT,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      },
+      REDIRECT_TIMEOUT_MS
+    );
 
-    const resolved = new URL(location, rawUrl);
-    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') {
+    const finalUrl = new URL(res.url || rawUrl);
+    if (finalUrl.protocol !== 'http:' && finalUrl.protocol !== 'https:') {
       return null;
     }
-    return resolved.toString();
+    // Never actually left Product Hunt — nothing useful was resolved.
+    if (finalUrl.hostname.endsWith('producthunt.com')) {
+      return null;
+    }
+    return finalUrl.toString();
   } catch {
     return null;
   }
@@ -396,12 +427,16 @@ async function fetchMonthProductsUncached(
 // application-level cache: a cache hit runs none of this module's code at
 // all (no GraphQL request, no website-redirect resolution), which is what
 // actually delivers "fetch once, then serve everyone from cache."
-const getCachedCurrentMonth = unstable_cache(fetchMonthProductsUncached, ['hunt-ideas-month-products', 'current'], {
-  revalidate: CURRENT_MONTH_CACHE_SECONDS,
-});
-const getCachedPastMonth = unstable_cache(fetchMonthProductsUncached, ['hunt-ideas-month-products', 'past'], {
-  revalidate: PAST_MONTH_CACHE_SECONDS,
-});
+const getCachedCurrentMonth = unstable_cache(
+  fetchMonthProductsUncached,
+  ['hunt-ideas-month-products', 'current', CACHE_VERSION],
+  { revalidate: CURRENT_MONTH_CACHE_SECONDS }
+);
+const getCachedPastMonth = unstable_cache(
+  fetchMonthProductsUncached,
+  ['hunt-ideas-month-products', 'past', CACHE_VERSION],
+  { revalidate: PAST_MONTH_CACHE_SECONDS }
+);
 
 export async function fetchMonthProducts(offsetRaw: number, now: Date = new Date()): Promise<MonthlyProducts> {
   const period = getPeriod(offsetRaw, now);
